@@ -1,0 +1,12 @@
+services:
+  - type: web
+    name: kesco-auto-coder
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn app:app --workers 1 --threads 4 --timeout 180
+    envVars:
+      - key: PUBLIC
+        value: "1"
+      - key: PYTHON_VERSION
+        value: 3.11.9
