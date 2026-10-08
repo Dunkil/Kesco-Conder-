@@ -1,10 +1,11 @@
 """KESCO Auto-Coder - local web app.  Run:  python app.py   then open http://127.0.0.1:5000"""
-import os, re, io, uuid, difflib, json, webbrowser, threading
+import os, re, io, uuid, difflib, json, webbrowser, threading, unicodedata, collections
 from pathlib import Path
 import numpy as np, openpyxl, pandas as pd
 from flask import Flask, request, jsonify, send_file, Response
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
+from sklearn.preprocessing import normalize
 
 BASE = Path(__file__).parent
 REF_SAVE = BASE / "kesco_reference.xlsx"
@@ -199,88 +200,7 @@ class KESCOMatcher:
             print(f"{spec['path']}: {len(mapped)} rows, {n_review} flagged NEEDS_REVIEW")
         return results
 
-# ---------------- web app ----------------
-app = Flask(__name__)
-PUBLIC = os.environ.get("PUBLIC") == "1"   # set on the web host: locks the reference file
-app.config["MAX_CONTENT_LENGTH"] = (25 if PUBLIC else 100) * 1024 * 1024
-STATE = {"matcher": None, "ref_name": None}
-JOBS = {}  # id -> {"name", "raw", "mapped", "column"}
-GUESS = re.compile(r"job.?title|occupation|position|role|designation|title", re.I)
-
-def find_reference():
-    cands = [REF_SAVE] + [p for p in BASE.glob("*.xlsx") if "kesco" in p.name.lower() and p != REF_SAVE and "mapped" not in p.name.lower()]
-    for p in cands:
-        if p.exists():
-            try:
-                STATE["matcher"] = KESCOMatcher(load_kesco_reference(str(p)), 0.45)
-                STATE["ref_name"] = p.name
-                return
-            except Exception as e:
-                print("Could not use", p.name, "->", e)
-find_reference()
-
-def read_any(f):
-    name = f.filename.lower()
-    return pd.read_csv(f) if name.endswith(".csv") else pd.read_excel(f)
-
-def guess_column(cols):
-    for c in cols:
-        if GUESS.search(str(c)): return str(c)
-    return str(cols[0])
-
-def to_records(df):
-    return json.loads(df.to_json(orient="records", date_format="iso"))
-
-def run_map(job, column):
-    job["column"] = column
-    job["mapped"] = STATE["matcher"].map_dataset(job["raw"], column)
-    m = job["mapped"]
-    return {"id": job["id"], "name": job["name"], "column": column, "columns": list(job["raw"].columns),
-            "rows": len(m), "matched": int((m["kesco_code_status"] == "MATCHED").sum()),
-            "review": int((m["kesco_code_status"] == "NEEDS_REVIEW").sum()),
-            "cols": list(m.columns), "data": to_records(m.head(2000))}
-
-@app.get("/")
-def index(): return Response(PAGE, mimetype="text/html")
-
-@app.get("/api/status")
-def status(): return jsonify(ref=STATE["ref_name"], public=PUBLIC)
-
-@app.post("/api/reference")
-def set_reference():
-    if PUBLIC: return jsonify(error="Reference is locked on the public site."), 403
-    f = request.files["file"]; f.save(REF_SAVE); STATE["matcher"] = None; find_reference()
-    if not STATE["matcher"]: return jsonify(error="Could not read that as a KESCO workbook (expected columns GROUP, CODE, DESCRIPTION)."), 400
-    return jsonify(ref=STATE["ref_name"])
-
-@app.post("/api/upload")
-def upload():
-    if not STATE["matcher"]: return jsonify(error="Upload the KESCO reference file first."), 400
-    try: df = read_any(request.files["file"])
-    except Exception as e: return jsonify(error=f"Could not read file: {e}"), 400
-    jid = uuid.uuid4().hex[:10]
-    while len(JOBS) >= 40: JOBS.pop(next(iter(JOBS)))  # keep memory small on free hosts
-    job = JOBS[jid] = {"id": jid, "name": request.files["file"].filename, "raw": df}
-    return jsonify(run_map(job, guess_column(list(df.columns))))
-
-@app.post("/api/remap")
-def remap():
-    d = request.json; job = JOBS[d["id"]]
-    return jsonify(run_map(job, d["column"]))
-
-@app.get("/download/<jid>")
-def download(jid):
-    if jid not in JOBS: return Response("Session expired - please upload the file again.", 410)
-    job = JOBS[jid]; m = job["mapped"]; stem = Path(job["name"]).stem
-    buf = io.BytesIO()
-    if request.args.get("fmt") == "csv":
-        buf.write(m.to_csv(index=False).encode("utf-8-sig")); buf.seek(0)
-        return send_file(buf, as_attachment=True, download_name=f"{stem}_KESCO_mapped.csv", mimetype="text/csv")
-    m.to_excel(buf, index=False); buf.seek(0)
-    return send_file(buf, as_attachment=True, download_name=f"{stem}_KESCO_mapped.xlsx")
-
-PAGE = r'''<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>KESCO Auto-Coder - Kenya occupation coding tool</title><meta name="description" content="Free online tool: upload an Excel or CSV of job titles and automatically code them to the Kenyan Standard Classification of Occupations (KESCO)."><style>
+PAGE_CSS = r"""
 :root{--bg:#f6f7f9;--card:#fff;--ink:#1c2430;--mut:#667085;--acc:#0b6b4f;--warn:#b54708;--line:#e4e7ec}
 *{box-sizing:border-box}body{margin:0;font:15px system-ui,Segoe UI,sans-serif;background:var(--bg);color:var(--ink)}
 header{padding:22px 32px;background:var(--acc);color:#fff}header h1{margin:0;font-size:22px}header p{margin:4px 0 0;opacity:.85}
@@ -293,42 +213,196 @@ button,.btn,select,input[type=text]{font:inherit;padding:8px 14px;border-radius:
 th,td{padding:7px 10px;border-bottom:1px solid var(--line);white-space:nowrap;text-align:left;max-width:320px;overflow:hidden;text-overflow:ellipsis}
 th{position:sticky;top:0;background:#f2f4f7}th.k{background:#d1fadf}td.k{background:#f3fbf6}tr.r td.k{background:#fef0c7}
 .tag{padding:2px 8px;border-radius:99px;font-size:12px}.M{background:#d1fadf;color:#05603a}.R{background:#fef0c7;color:var(--warn)}
-#msg{color:#b42318;margin-top:8px}.hide{display:none}</style></head><body>
-<header><h1>KESCO Auto-Coder</h1><p>Upload an Excel/CSV of job vacancies &rarr; occupations are coded to KESCO automatically.</p></header><main>
-<div class="card row" id="refbox"><span id="reftxt">Checking KESCO reference&hellip;</span>
-<label class="btn">Upload / replace KESCO reference<input type="file" id="reffile" accept=".xlsx" hidden></label></div>
+#msg{color:#b42318;margin-top:8px}.hide{display:none}"""
+
+# ---------------- web app: KeSCO + KeSic ----------------
+JSON_REF = BASE / "kesco_kesic_reference.json"
+app = Flask(__name__)
+PUBLIC = os.environ.get("PUBLIC") == "1"
+app.config["MAX_CONTENT_LENGTH"] = (25 if PUBLIC else 100) * 1024 * 1024
+STATE = {"ns": None, "old": None, "ref": None}
+JOBS = {}
+fmt = lambda c: f"{c[:4]}-{c[4:]}" if c else ""
+TGUESS = re.compile(r"job.?title|occupation|position|designation|title|role", re.I)
+CGUESS = re.compile(r"company|employer|organi[sz]ation|firm", re.I)
+
+def load_coder():
+    ref = json.load(open(JSON_REF, encoding="utf-8"))
+    ns = dict(re=re, unicodedata=unicodedata, collections=collections, TfidfVectorizer=TfidfVectorizer, normalize=normalize,
+              KESCO_TITLES=ref["kesco_titles"], KESIC_DESC=ref["kesic_desc"], TITLE_DEC=ref["title_decisions"],
+              COMPANY_DEC=ref["company_decisions"], UNNAMED={u.lower() for u in ref["unnamed_companies"]},
+              RAW_DEC=ref.setdefault("raw_title_decisions", {}))
+    exec(compile((BASE / "coder_core.py").read_text(encoding="utf-8"), "coder_core.py", "exec"), ns)
+    try: df = load_kesco_reference(str(REF_SAVE))
+    except Exception:  # fall back to the official titles inside the JSON
+        df = pd.DataFrame([dict(code=fmt(c), title=t, major_group=None, sub_major_group=None, minor_group=None, unit_group=None)
+                           for c, t in ref["kesco_titles"].items()])
+    STATE.update(ref=ref, ns=ns, old=KESCOMatcher(df, 0.45))
+
+try: load_coder()
+except Exception as e: print("Reference not loaded:", e)
+
+def read_any(f, **kw):
+    return pd.read_csv(f, **kw) if f.filename.lower().endswith(".csv") else pd.read_excel(f, **kw)
+
+def guess(cols, rx, default=None):
+    for c in cols:
+        if rx.search(str(c)): return str(c)
+    return default
+
+NEWCOLS = {"kesco code", "kesco title", "kesco status", "kesic code", "kesic title", "kesic status"}
+
+def code_dataset(df, tcol, ccol):
+    ns, old = STATE["ns"], STATE["old"]
+    base = df.drop(columns=[c for c in df.columns if str(c).strip().lower() in NEWCOLS])
+    titles = base[tcol].fillna("").astype(str).tolist()
+    uniq = list(dict.fromkeys(titles))
+    new = ns["code_titles"](uniq)
+    second = dict(zip(uniq, old._match_many(uniq, top_n=1)))
+    res = {}
+    for t in uniq:
+        code, status, via = new[t]
+        o = (second.get(t) or [{}])[0]
+        oc = (o.get("code") or "").replace("-", ""); conf = o.get("confidence") or 0
+        if status not in ("exact", "close match") and oc:
+            if code == oc and conf >= old.threshold: status = "likely (both methods agree)"
+            elif conf >= old.threshold: code, status = oc, f"REVIEW (methods disagree, {conf:.2f})"
+        res[t] = (code, status)
+    out = base.copy()
+    pos = list(out.columns).index(tcol) + 1
+    out.insert(pos, "kesco code", [fmt(res[t][0]) for t in titles])
+    out.insert(pos + 1, "kesco title", [ns["KESCO_TITLES"].get(res[t][0], "") for t in titles])
+    out.insert(pos + 2, "kesco status", [res[t][1] for t in titles])
+    meta = pd.DataFrame(index=out.index)
+    meta["needs_review"] = [s.startswith("REVIEW") for s in out["kesco status"]]
+    meta["kesic suggestion"] = ""
+    if ccol:
+        cos = base[ccol].fillna("").astype(str).tolist()
+        cc = {c: ns["code_company"](c) for c in dict.fromkeys(cos)}
+        rev = [cc[c][1].startswith("REVIEW") for c in cos]
+        codes = ["" if r else (cc[c][0] or "") for c, r in zip(cos, rev)]
+        p2 = list(out.columns).index(ccol) + 1
+        out.insert(p2, "kesic code", codes)
+        out.insert(p2 + 1, "kesic title", [ns["KESIC_DESC"].get(k, "") for k in codes])
+        out.insert(p2 + 2, "kesic status", ["REVIEW" if r else cc[c][1].split(" (")[0] for c, r in zip(cos, rev)])
+        meta["kesic suggestion"] = [(cc[c][0] or "") if r else "" for c, r in zip(cos, rev)]
+        meta["needs_review"] = meta["needs_review"] | pd.Series(rev, index=out.index)
+    return out, meta
+
+def run(job, tcol, ccol):
+    job["tcol"], job["ccol"] = tcol, ccol
+    m, meta = code_dataset(job["raw"], tcol, ccol)
+    job["mapped"], job["meta"] = m, meta
+    st = m["kesco status"].str.split(" ", n=1).str[0].value_counts()
+    view = m.head(2000).copy(); view["needs_review"] = meta["needs_review"].head(2000)
+    return {"id": job["id"], "name": job["name"], "tcol": tcol, "ccol": ccol or "", "columns": [str(c) for c in job["raw"].columns if str(c).strip().lower() not in NEWCOLS],
+            "rows": len(m), "exact": int(st.get("exact", 0)), "close": int(st.get("close", 0)),
+            "likely": int(st.get("likely", 0)), "review": int(meta["needs_review"].sum()),
+            "kesic": int((m["kesic code"] != "").sum()) if ccol else 0,
+            "cols": [str(c) for c in view.columns], "data": json.loads(view.to_json(orient="records", date_format="iso"))}
+
+@app.get("/")
+def index(): return Response(PAGE, mimetype="text/html")
+
+@app.get("/api/status")
+def status(): return jsonify(ready=STATE["ns"] is not None, public=PUBLIC)
+
+@app.post("/api/upload")
+def upload():
+    if not STATE["ns"]: return jsonify(error="kesco_kesic_reference.json is missing on the server."), 400
+    try: df = read_any(request.files["file"])
+    except Exception as e: return jsonify(error=f"Could not read file: {e}"), 400
+    cols = list(df.columns)
+    tcol = guess(cols, TGUESS, str(cols[0])); ccol = guess([c for c in cols if str(c) != tcol], CGUESS)
+    while len(JOBS) >= 40: JOBS.pop(next(iter(JOBS)))
+    jid = uuid.uuid4().hex[:10]
+    job = JOBS[jid] = {"id": jid, "name": request.files["file"].filename, "raw": df}
+    return jsonify(run(job, tcol, ccol))
+
+@app.post("/api/remap")
+def remap():
+    d = request.json
+    return jsonify(run(JOBS[d["id"]], d["tcol"], d.get("ccol") or None))
+
+@app.post("/api/learn")
+def learn():
+    if PUBLIC: return jsonify(error="Learning is disabled on the public site."), 403
+    df = read_any(request.files["file"], dtype=str); tc, cc = request.form["tcol"], request.form.get("ccol")
+    ref, ns = STATE["ref"], STATE["ns"]; at = ac = 0
+    for _, r in df.iterrows():
+        t = r.get(tc); ko = str(r.get("kesco code", "")).replace("-", "").strip()
+        if pd.notna(t) and ko in ref["kesco_titles"]:
+            keys = ns["title_keys"](t)
+            if keys and ref["title_decisions"].get(keys[0]) != ko: ref["title_decisions"][keys[0]] = ko; at += 1
+            elif not keys: ref["raw_title_decisions"][str(t).strip()] = ko; at += 1
+        if cc:
+            comp = ns["clean_company"](r.get(cc)); ki = str(r.get("kesic code", "")).strip()
+            if comp and comp.lower() not in ns["UNNAMED"] and ki in ref["kesic_desc"] and ref["company_decisions"].get(comp) != ki:
+                ref["company_decisions"][comp] = ki; ac += 1
+    json.dump(ref, open(JSON_REF, "w", encoding="utf-8"), ensure_ascii=False); load_coder()
+    return jsonify(titles=at, companies=ac)
+
+@app.get("/download/<jid>")
+def download(jid):
+    if jid not in JOBS: return Response("Session expired - please upload the file again.", 410)
+    job = JOBS[jid]; m = job["mapped"]; meta = job["meta"]; stem = Path(job["name"]).stem; buf = io.BytesIO()
+    if request.args.get("fmt") == "csv":
+        buf.write(m.to_csv(index=False).encode("utf-8-sig")); buf.seek(0)
+        return send_file(buf, as_attachment=True, download_name=f"{stem}_CODED.csv", mimetype="text/csv")
+    rv = m[meta["needs_review"]].copy(); rv.insert(0, "row", rv.index + 2)
+    keep = ["row", job["tcol"], "kesco code", "kesco title", "kesco status"]
+    if job["ccol"]:
+        rv["kesic suggestion"] = meta.loc[rv.index, "kesic suggestion"]
+        keep += [job["ccol"], "kesic code", "kesic title", "kesic status", "kesic suggestion"]
+    from openpyxl.styles import PatternFill
+    with pd.ExcelWriter(buf, engine="openpyxl") as w:
+        m.to_excel(w, sheet_name="Coded", index=False)
+        rv[keep].to_excel(w, sheet_name="Coding review", index=False)
+        ws = w.sheets["Coded"]; ci = list(m.columns).index("kesco code") + 1
+        for i, flag in enumerate(meta["needs_review"], start=2):
+            if flag: ws.cell(i, ci).fill = PatternFill("solid", fgColor="FFF2CC")
+    buf.seek(0)
+    return send_file(buf, as_attachment=True, download_name=f"{stem}_CODED.xlsx")
+
+PAGE = r"""<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>KeSCO &amp; KeSic Auto-Coder - Kenya occupation and industry coding tool</title>
+<meta name="description" content="Free online tool: upload an Excel or CSV of job vacancies and automatically code job titles to KeSCO and companies to KeSic.">
+<style>CSSHERE</style></head><body>
+<header><h1>KeSCO &amp; KeSic Auto-Coder</h1><p>Upload a vacancies Excel/CSV &rarr; job titles are coded to KeSCO and companies to KeSic automatically.</p></header><main>
+<div class="card" id="refbox"><span id="reftxt">Checking reference...</span></div>
 <div class="card"><div id="drop">Drop your Excel / CSV file here, or click to browse<input type="file" id="file" accept=".xlsx,.xls,.csv" hidden></div><div id="msg"></div></div>
-<div id="out" class="hide"><div class="card"><div class="row"><div class="stat"><b id="sRows">0</b>rows</div><div class="stat"><b id="sM">0</b>matched</div>
-<div class="stat"><b id="sR">0</b>need review</div><span style="flex:1"></span>
-<span>Occupation column:</span><select id="col"></select><button id="remap">Re-code</button></div>
-<div class="row" style="margin-top:14px"><button class="p" id="viewBtn">View results</button><a class="btn p" id="dx">Download Excel</a><a class="btn" id="dc">Download CSV</a></div></div>
-<div class="card hide" id="view"><div class="row" style="margin-bottom:10px"><select id="flt"><option value="">All rows</option><option value="NEEDS_REVIEW">Needs review only</option><option value="MATCHED">Matched only</option></select>
+<div id="out" class="hide"><div class="card"><div class="row"><div class="stat"><b id="sRows">0</b>rows</div><div class="stat"><b id="sE">0</b>exact</div>
+<div class="stat"><b id="sC">0</b>close / likely</div><div class="stat"><b id="sR">0</b>need review</div><div class="stat"><b id="sK">0</b>KeSic coded</div></div>
+<div class="row" style="margin-top:14px"><span>Job title column:</span><select id="tcol"></select><span>Company column:</span><select id="ccol"></select><button id="remap">Re-code</button></div>
+<div class="row" style="margin-top:14px"><button class="p" id="viewBtn">View results</button><a class="btn p" id="dx">Download Excel</a><a class="btn" id="dc">Download CSV</a>
+<label class="btn" id="learnLbl">Upload corrected file (teach the coder)<input type="file" id="learn" accept=".xlsx,.csv" hidden></label></div></div>
+<div class="card hide" id="view"><div class="row" style="margin-bottom:10px"><select id="flt"><option value="">All rows</option><option value="r">Needs review only</option><option value="ok">Trusted only</option></select>
 <input type="text" id="q" placeholder="Search..." style="flex:1"><span id="cnt" style="color:var(--mut)"></span></div><div class="wrap"><table id="t"></table></div></div></div></main>
 <script>
-const $=id=>document.getElementById(id);let cur=null;
-async function ref(){const r=await(await fetch('/api/status')).json();if(r.public)$('refbox').innerHTML='KESCO reference: <b>'+r.ref+'</b> (built in)';else $('reftxt').innerHTML=r.ref?'KESCO reference loaded: <b>'+r.ref+'</b>':'<b style="color:#b54708">No KESCO reference yet</b> - upload your KESCO structure Excel file (once; it is remembered).'}
-ref();
-$('reffile').onchange=async e=>{const fd=new FormData();fd.append('file',e.target.files[0]);$('reftxt').textContent='Reading reference...';
-const r=await fetch('/api/reference',{method:'POST',body:fd});const j=await r.json();if(!r.ok)$('msg').textContent=j.error;else $('msg').textContent='';ref()};
+const $=id=>document.getElementById(id);let cur=null,pub=false;
+fetch('/api/status').then(r=>r.json()).then(r=>{pub=r.public;$('reftxt').innerHTML=r.ready?'KeSCO / KeSic reference loaded (built in).':'<b style="color:#b54708">Reference file missing on the server.</b>';if(pub)$('learnLbl').classList.add('hide')});
 $('drop').onclick=()=>$('file').click();
 ['dragover','dragenter'].forEach(ev=>$('drop').addEventListener(ev,e=>{e.preventDefault();$('drop').classList.add('on')}));
 ['dragleave','drop'].forEach(ev=>$('drop').addEventListener(ev,e=>{e.preventDefault();$('drop').classList.remove('on')}));
 $('drop').addEventListener('drop',e=>send(e.dataTransfer.files[0]));$('file').onchange=e=>send(e.target.files[0]);
-async function send(f){if(f&&f.size>25*1024*1024){$('msg').textContent='File too large (max 25 MB).';return}if(!f)return;$('msg').textContent='';$('drop').firstChild.textContent='Coding '+f.name+' ...';const fd=new FormData();fd.append('file',f);
-const r=await fetch('/api/upload',{method:'POST',body:fd});const j=await r.json();$('drop').firstChild.textContent='Drop another Excel / CSV file here, or click to browse';
+async function send(f){if(!f)return;if(f.size>25*1024*1024&&pub){$('msg').textContent='File too large (max 25 MB).';return}$('msg').textContent='';$('drop').firstChild.textContent='Coding '+f.name+' ...';
+const fd=new FormData();fd.append('file',f);const r=await fetch('/api/upload',{method:'POST',body:fd});const j=await r.json();$('drop').firstChild.textContent='Drop another Excel / CSV file here, or click to browse';
 if(!r.ok){$('msg').textContent=j.error;return}show(j)}
-function show(j){cur=j;$('out').classList.remove('hide');$('sRows').textContent=j.rows;$('sM').textContent=j.matched;$('sR').textContent=j.review;
-$('col').innerHTML=j.columns.map(c=>'<option'+(c==j.column?' selected':'')+'>'+c+'</option>').join('');
+function show(j){cur=j;$('out').classList.remove('hide');$('sRows').textContent=j.rows;$('sE').textContent=j.exact;$('sC').textContent=j.close+j.likely;$('sR').textContent=j.review;$('sK').textContent=j.kesic;
+$('tcol').innerHTML=j.columns.map(c=>'<option'+(c==j.tcol?' selected':'')+'>'+c+'</option>').join('');
+$('ccol').innerHTML='<option value="">(none - skip KeSic)</option>'+j.columns.map(c=>'<option'+(c==j.ccol?' selected':'')+'>'+c+'</option>').join('');
 $('dx').href='/download/'+j.id;$('dc').href='/download/'+j.id+'?fmt=csv';render()}
-$('remap').onclick=async()=>{const r=await fetch('/api/remap',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:cur.id,column:$('col').value})});show(await r.json())};
-$('viewBtn').onclick=()=>{$('view').classList.toggle('hide')};$('flt').onchange=render;$('q').oninput=render;
-const esc=s=>String(s??'').replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
-function render(){if(!cur)return;const q=$('q').value.toLowerCase(),f=$('flt').value;
-let d=cur.data.filter(r=>(!f||r.kesco_code_status==f)&&(!q||JSON.stringify(r).toLowerCase().includes(q)));$('cnt').textContent=d.length+' rows'+(cur.rows>2000?' (preview of first 2,000 - download has all '+cur.rows+')':'');
-$('t').innerHTML='<tr>'+cur.cols.map(c=>'<th class="'+(c.startsWith('kesco')?'k':'')+'">'+esc(c)+'</th>').join('')+'</tr>'+
-d.slice(0,500).map(r=>'<tr class="'+(r.kesco_code_status=='NEEDS_REVIEW'?'r':'')+'">'+cur.cols.map(c=>{const k=c.startsWith('kesco');let v=r[c];
-if(c=='kesco_code_status')v='<span class="tag '+(v=='MATCHED'?'M':'R')+'">'+v+'</span>';else v=esc(v);return '<td class="'+(k?'k':'')+'" title="'+(k?'':v)+'">'+v+'</td>'}).join('')+'</tr>').join('')}
-</script></body></html>'''
+$('remap').onclick=async()=>{const r=await fetch('/api/remap',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:cur.id,tcol:$('tcol').value,ccol:$('ccol').value})});show(await r.json())};
+$('learn').onchange=async e=>{const fd=new FormData();fd.append('file',e.target.files[0]);fd.append('tcol',cur.tcol);fd.append('ccol',cur.ccol);
+const r=await fetch('/api/learn',{method:'POST',body:fd});const j=await r.json();alert(r.ok?'Learned '+j.titles+' titles and '+j.companies+' companies. Re-code to use them.':j.error)};
+$('viewBtn').onclick=()=>$('view').classList.toggle('hide');$('flt').onchange=render;$('q').oninput=render;
+const esc=s=>String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+function render(){if(!cur)return;const q=$('q').value.toLowerCase(),f=$('flt').value,cols=cur.cols.filter(c=>c!='needs_review');
+let d=cur.data.filter(r=>(!f||(f=='r')==!!r.needs_review)&&(!q||JSON.stringify(r).toLowerCase().includes(q)));
+$('cnt').textContent=d.length+' rows'+(cur.rows>2000?' (preview of first 2,000 - download has all '+cur.rows+')':'');
+$('t').innerHTML='<tr>'+cols.map(c=>'<th class="'+(/^kes(co|ic) /.test(c)?'k':'')+'">'+esc(c)+'</th>').join('')+'</tr>'+
+d.slice(0,500).map(r=>'<tr class="'+(r.needs_review?'r':'')+'">'+cols.map(c=>'<td class="'+(/^kes(co|ic) /.test(c)?'k':'')+'" title="'+esc(r[c])+'">'+esc(r[c])+'</td>').join('')+'</tr>').join('')}
+</script></body></html>""".replace("CSSHERE", PAGE_CSS)
 
 if __name__ == "__main__":
     threading.Timer(1.2, lambda: webbrowser.open("http://127.0.0.1:5000")).start()
