@@ -258,7 +258,8 @@ def code_dataset(df, tcol, ccol):
     titles = base[tcol].fillna("").astype(str).tolist()
     uniq = list(dict.fromkeys(titles))
     new = ns["code_titles"](uniq)
-    second = dict(zip(uniq, old._match_many(uniq, top_n=1)))
+    need = [t for t in uniq if new[t][1] not in ("exact", "close match")]   # second opinion only where needed
+    second = dict(zip(need, old._match_many(need, top_n=1, chunk_size=100))) if need else {}
     res = {}
     for t in uniq:
         code, status, via = new[t]
@@ -289,9 +290,13 @@ def code_dataset(df, tcol, ccol):
         meta["needs_review"] = meta["needs_review"] | pd.Series(rev, index=out.index)
     return out, meta
 
+RUN_LOCK = threading.Lock()   # one coding job at a time keeps memory low
+
 def run(job, tcol, ccol):
     job["tcol"], job["ccol"] = tcol, ccol
-    m, meta = code_dataset(job["raw"], tcol, ccol)
+    with RUN_LOCK:
+        m, meta = code_dataset(job["raw"], tcol, ccol)
+        import gc; gc.collect()
     job["mapped"], job["meta"] = m, meta
     st = m["kesco status"].str.split(" ", n=1).str[0].value_counts()
     view = m.head(2000).copy(); view["needs_review"] = meta["needs_review"].head(2000)
@@ -314,7 +319,7 @@ def upload():
     except Exception as e: return jsonify(error=f"Could not read file: {e}"), 400
     cols = list(df.columns)
     tcol = guess(cols, TGUESS, str(cols[0])); ccol = guess([c for c in cols if str(c) != tcol], CGUESS)
-    while len(JOBS) >= 40: JOBS.pop(next(iter(JOBS)))
+    while len(JOBS) >= 4: JOBS.pop(next(iter(JOBS)))
     jid = uuid.uuid4().hex[:10]
     job = JOBS[jid] = {"id": jid, "name": request.files["file"].filename, "raw": df}
     return jsonify(run(job, tcol, ccol))

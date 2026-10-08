@@ -121,8 +121,8 @@ _Pw = normalize(_wv.fit_transform(_pool_keys)); _Pc = normalize(_cv.fit_transfor
 def nearest_titles(keys):
     Tw = normalize(_wv.transform(keys)); Tc = normalize(_cv.transform(keys))
     out = []
-    for s in range(0, len(keys), 400):
-        sim = (0.6 * (Tw[s:s+400] @ _Pw.T) + 0.4 * (Tc[s:s+400] @ _Pc.T)).toarray()
+    for s in range(0, len(keys), 40):
+        sim = (0.6 * (Tw[s:s+40] @ _Pw.T) + 0.4 * (Tc[s:s+40] @ _Pc.T)).toarray().astype('float32')
         for row in sim:
             i = int(row.argmax()); out.append((_pool_keys[i], _pool_codes[i], float(row[i])))
     return out
