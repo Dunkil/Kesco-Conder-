@@ -201,18 +201,18 @@ class KESCOMatcher:
         return results
 
 PAGE_CSS = r"""
-:root{--bg:#f6f7f9;--card:#fff;--ink:#1c2430;--mut:#667085;--acc:#0b6b4f;--warn:#b54708;--line:#e4e7ec}
+:root{--bg:#f6f7f9;--card:#fff;--ink:#1c2430;--mut:#667085;--acc:#0a56b3;--warn:#b54708;--line:#e4e7ec}
 *{box-sizing:border-box}body{margin:0;font:15px system-ui,Segoe UI,sans-serif;background:var(--bg);color:var(--ink)}
-header{padding:22px 32px;background:var(--acc);color:#fff}header h1{margin:0;font-size:22px}header p{margin:4px 0 0;opacity:.85}
+header{padding:22px 32px;background:linear-gradient(135deg,#083f86,var(--acc));color:#fff}header h1{margin:0;font-size:22px}header p{margin:4px 0 0;opacity:.85}
 main{max-width:1250px;margin:24px auto;padding:0 20px}.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:20px;margin-bottom:18px}
-#drop{border:2px dashed #98a2b3;border-radius:12px;padding:38px;text-align:center;cursor:pointer;color:var(--mut)}#drop.on{border-color:var(--acc);background:#ecfdf3}
+#drop{border:2px dashed #98a2b3;border-radius:12px;padding:38px;text-align:center;cursor:pointer;color:var(--mut)}#drop.on{border-color:var(--acc);background:#eaf2ff}
 button,.btn,select,input[type=text]{font:inherit;padding:8px 14px;border-radius:8px;border:1px solid var(--line);background:#fff;cursor:pointer}
 .btn.p,button.p{background:var(--acc);color:#fff;border-color:var(--acc)}.row{display:flex;gap:12px;align-items:center;flex-wrap:wrap}
 .stat{padding:10px 16px;border-radius:10px;background:var(--bg)}.stat b{font-size:20px;display:block}
 .wrap{overflow:auto;max-height:560px;border:1px solid var(--line);border-radius:8px}table{border-collapse:collapse;width:100%;font-size:13px}
 th,td{padding:7px 10px;border-bottom:1px solid var(--line);white-space:nowrap;text-align:left;max-width:320px;overflow:hidden;text-overflow:ellipsis}
-th{position:sticky;top:0;background:#f2f4f7}th.k{background:#d1fadf}td.k{background:#f3fbf6}tr.r td.k{background:#fef0c7}
-.tag{padding:2px 8px;border-radius:99px;font-size:12px}.M{background:#d1fadf;color:#05603a}.R{background:#fef0c7;color:var(--warn)}
+th{position:sticky;top:0;background:#f2f4f7}th.k{background:#cfe2ff}td.k{background:#f3f8ff}tr.r td.k{background:#fef0c7}
+.tag{padding:2px 8px;border-radius:99px;font-size:12px}.M{background:#cfe2ff;color:#083f86}.R{background:#fef0c7;color:var(--warn)}
 #msg{color:#b42318;margin-top:8px}.hide{display:none}"""
 
 # ---------------- web app: KeSCO + KeSic ----------------
@@ -372,10 +372,16 @@ def download(jid):
 PAGE = r"""<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>KeSCO &amp; KeSic Auto-Coder - Kenya occupation and industry coding tool</title>
 <meta name="description" content="Free online tool: upload an Excel or CSV of job vacancies and automatically code job titles to KeSCO and companies to KeSic.">
-<style>CSSHERE</style></head><body>
-<header><h1>KeSCO &amp; KeSic Auto-Coder</h1><p>Upload a vacancies Excel/CSV &rarr; job titles are coded to KeSCO and companies to KeSic automatically.</p></header><main>
+<style>CSSHERE
+.big{font-size:17px;padding:12px 34px;font-weight:600}#drop{display:flex;flex-direction:column;align-items:center;gap:12px}
+#bar{height:8px;background:#e4e7ec;border-radius:99px;overflow:hidden;margin-top:12px}#barfill{display:block;height:100%;width:0;background:var(--acc);transition:width .2s}
+#barfill.busy{width:40%!important;animation:slide 1.3s infinite ease-in-out}@keyframes slide{0%{margin-left:-40%}100%{margin-left:100%}}
+#stmsg{font-weight:600;color:var(--acc)}
+</style></head><body>
+<header><h1>KLMIS &middot; KeSCO &amp; KeSic Auto-Coder</h1><p>Upload a vacancies Excel/CSV &rarr; job titles are coded to KeSCO and companies to KeSic automatically.</p></header><main>
 <div class="card" id="refbox"><span id="reftxt">Checking reference...</span></div>
-<div class="card"><div id="drop">Drop your Excel / CSV file here, or click to browse<input type="file" id="file" accept=".xlsx,.xls,.csv" hidden></div><div id="msg"></div></div>
+<div class="card"><div id="drop"><button class="p big" id="pick" type="button">Upload file</button><div id="dtxt">or drop your Excel / CSV file here</div><input type="file" id="file" accept=".xlsx,.xls,.csv" hidden></div>
+<div id="stage" class="hide"><div id="stmsg"></div><div id="bar"><i id="barfill"></i></div></div><div id="msg"></div></div>
 <div id="out" class="hide"><div class="card"><div class="row"><div class="stat"><b id="sRows">0</b>rows</div><div class="stat"><b id="sE">0</b>exact</div>
 <div class="stat"><b id="sC">0</b>close / likely</div><div class="stat"><b id="sR">0</b>need review</div><div class="stat"><b id="sK">0</b>KeSic coded</div></div>
 <div class="row" style="margin-top:14px"><span>Job title column:</span><select id="tcol"></select><span>Company column:</span><select id="ccol"></select><button id="remap">Re-code</button></div>
@@ -390,9 +396,18 @@ $('drop').onclick=()=>$('file').click();
 ['dragover','dragenter'].forEach(ev=>$('drop').addEventListener(ev,e=>{e.preventDefault();$('drop').classList.add('on')}));
 ['dragleave','drop'].forEach(ev=>$('drop').addEventListener(ev,e=>{e.preventDefault();$('drop').classList.remove('on')}));
 $('drop').addEventListener('drop',e=>send(e.dataTransfer.files[0]));$('file').onchange=e=>send(e.target.files[0]);
-async function send(f){if(!f)return;if(f.size>25*1024*1024&&pub){$('msg').textContent='File too large (max 25 MB).';return}$('msg').textContent='';$('drop').firstChild.textContent='Coding '+f.name+' ...';
-const fd=new FormData();fd.append('file',f);const r=await fetch('/api/upload',{method:'POST',body:fd});const j=await r.json();$('drop').firstChild.textContent='Drop another Excel / CSV file here, or click to browse';
-if(!r.ok){$('msg').textContent=j.error;return}show(j)}
+let timer=null;
+function setStage(t,p,busy){$('stmsg').textContent=t;const b=$('barfill');b.classList.toggle('busy',!!busy);if(!busy)b.style.width=p+'%'}
+function fail(m){clearInterval(timer);$('stage').classList.add('hide');$('msg').textContent=m}
+function send(f){if(!f)return;if(f.size>25*1024*1024&&pub){$('msg').textContent='File too large (max 25 MB).';return}
+$('msg').textContent='';$('out').classList.add('hide');$('stage').classList.remove('hide');setStage('Uploading '+f.name+' ...',0);
+const fd=new FormData();fd.append('file',f);const x=new XMLHttpRequest();x.open('POST','/api/upload');
+x.upload.onprogress=e=>{if(e.lengthComputable)setStage('Uploading '+f.name+' ... '+Math.round(e.loaded/e.total*100)+'%',e.loaded/e.total*100)};
+x.upload.onload=()=>{const t0=Date.now();const tick=()=>setStage('\u2714 Uploaded successfully. Coding your file, please wait ('+Math.round((Date.now()-t0)/1000)+'s) - large files can take a few minutes ...',100,true);tick();timer=setInterval(tick,1000)};
+x.onload=()=>{clearInterval(timer);let j;try{j=JSON.parse(x.responseText)}catch(e){return fail('The server took too long or restarted. Please try again.')}
+if(x.status!=200)return fail(j.error||'Something went wrong.');setStage('\u2714 Coding complete. Preparing your results ...',100);
+setTimeout(()=>{$('stage').classList.add('hide');show(j);$('view').classList.remove('hide');$('out').scrollIntoView({behavior:'smooth'})},1500)};
+x.onerror=()=>fail('Upload failed. Check your connection and try again.');x.send(fd);$('file').value=''}
 function show(j){cur=j;$('out').classList.remove('hide');$('sRows').textContent=j.rows;$('sE').textContent=j.exact;$('sC').textContent=j.close+j.likely;$('sR').textContent=j.review;$('sK').textContent=j.kesic;
 $('tcol').innerHTML=j.columns.map(c=>'<option'+(c==j.tcol?' selected':'')+'>'+c+'</option>').join('');
 $('ccol').innerHTML='<option value="">(none - skip KeSic)</option>'+j.columns.map(c=>'<option'+(c==j.ccol?' selected':'')+'>'+c+'</option>').join('');
